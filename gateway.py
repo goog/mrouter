@@ -19,7 +19,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -93,6 +93,23 @@ MODEL_COST: dict[str, tuple[float, float]] = {
 }
 
 
+_TOKEN_RE = re.compile(
+    r"""
+    [A-Za-z]+(?:'[A-Za-z]+)?   # words with optional apostrophe
+    | \d+                       # numbers
+    | [^\w\s]                   # individual punctuation/symbols
+    | [\u4e00-\u9fff]            # each CJK char ≈ 1 token
+    """,
+    re.VERBOSE,
+)
+
+def count_tokens(text: str) -> int:
+    """Fast approximation — no model needed. Within ~20% of BPE for English."""
+    # Rule of thumb: ~4 chars/token for English, 1 char/token for CJK
+    pieces = _TOKEN_RE.findall(text)
+    # Long words get split further by BPE; approximate that
+    extra = sum(max(0, len(p) // 6) for p in pieces if p.isalpha())
+    return len(pieces) + extra
 # ─── Complexity Classifier ─────────────────────────────────────────────────────
 
 
@@ -106,7 +123,7 @@ class ComplexityClassifier:
 
     COMPLEX_PATTERNS = [
         "write a complete", "implement", "analyze in depth", "深度分析", "distributed", "with tests",
-        "step by step", "step-by-step", "architecture", "design system",
+        "step by step", "step-by-step", "architecture", "design system", "query info",
         "compare and contrast", "pros and cons", "debug", "优化",
         "proof", "mathematical", "legal", "medical advice",
         "write a research", "comprehensive", "详细",
@@ -140,7 +157,7 @@ class ComplexityClassifier:
             return hint
 
         text = prompt.lower()
-        token_count = len(prompt.split())
+        token_count = count_tokens(text)
         logger.info(f"token count: {token_count}")
         # Short prompt
         if token_count < 20:
@@ -275,6 +292,7 @@ class OpenrouterClient(BaseProviderClient):
         }
 
     async def complete(self, model: str, messages: list[dict], max_tokens: int = 2048, **kwargs) -> dict:
+        logger.info("openrouter completing")
         difficulty = kwargs.get("diff", "simple")
         if difficulty == "complex":
             payload = {"model": model, "max_tokens": max_tokens, "messages": messages, "reasoning": {"enabled": True} }
@@ -284,19 +302,15 @@ class OpenrouterClient(BaseProviderClient):
             r = await client.post(self.BASE_URL, headers=self.headers, json=payload)
             r.raise_for_status()
             data = r.json()
-            return {
-                "content": data["choices"][0]["message"]["content"],
-                "usage": {
-                    "prompt_tokens": data["usage"]["prompt_tokens"],
-                    "completion_tokens": data["usage"]["completion_tokens"],
-                }
-            }
+            return data
 
     async def stream(self, model: str, messages: list[dict], max_tokens: int = 2048, **kwargs):
+        print("stream handle")
         payload = {"model": model, "max_tokens": max_tokens, "messages": messages, "stream": True}
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream("POST", self.BASE_URL, headers=self.headers, json=payload) as resp:
                 async for line in resp.aiter_lines():
+                    print(f"line: {line}")
                     if line.startswith("data: "):
                         data = line[6:]
                         if data == "[DONE]":
@@ -305,7 +319,7 @@ class OpenrouterClient(BaseProviderClient):
                             obj = json.loads(data)
                             delta = obj["choices"][0]["delta"].get("content", "")
                             if delta:
-                                yield delta
+                                yield line
                         except Exception:
                             pass
 
@@ -376,11 +390,13 @@ class OllamaClient(BaseProviderClient):
 
 # ─── Request / Response models ─────────────────────────────────────────────────
 class ChatMessage(BaseModel):
-    role: str = Field(pattern="^(user|assistant|system)$")
-    content: str
+    model_config = ConfigDict(extra="allow")
+    role: str = Field(pattern="^(user|assistant|system|tool)$")
+    content: str | None = None
 
 
 class GatewayRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     messages: list[ChatMessage]
     difficulty: Optional[TaskDifficulty] = None   # override auto-classification
     provider: Optional[Provider] = None           # force a specific provider
@@ -528,14 +544,8 @@ class LLMGateway:
         self.request_log.append(log_entry)
         if len(self.request_log) > 500:
             self.request_log = self.request_log[-500:]
-
-        return {
-            "content": result["content"],
-            "route": asdict(decision),
-            "usage": result.get("usage", {}),
-            "cost_usd": log_entry["cost_usd"],
-            "latency_ms": log_entry["latency_ms"],
-        }
+            
+        return result
 
     async def stream_complete(self, req: GatewayRequest):
         decision = self.route(req)
@@ -543,13 +553,15 @@ class LLMGateway:
         messages = [m.model_dump() for m in req.messages]
 
         meta = json.dumps({"route": asdict(decision)})
-        yield f"data: {meta}\n\n"
+        #yield f"data: {meta}\n\n"
 
         t0 = time.perf_counter()
         try:
             async for chunk in client.stream(decision.model, messages, max_tokens=req.max_tokens):
                 if chunk:
-                    yield f"data: {json.dumps({'delta': chunk})}\n\n"
+                    logger.info(f"chunk {chunk}")
+                    yield f"{chunk}\n\n"
+                yield "data: [DONE]\n\n"  # jay added
         except Exception as e:
             self.stats.errors += 1
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -575,10 +587,19 @@ gateway = LLMGateway()
 @app.post("/v1/chat/completions")
 async def chat_completions(req: GatewayRequest):
     """OpenAI-compatible chat completions endpoint with intelligent routing."""
+    #body = await req.json()
+    #print(body)
+    #return {"ok": True}
+    #logger.info(f"✅ req data {req}")
     if req.stream:
         return StreamingResponse(
             gateway.stream_complete(req),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",   # disables nginx buffering
+            }
         )
     return await gateway.complete(req)
 
