@@ -561,12 +561,13 @@ class LLMGateway:
                 if chunk:
                     logger.info(f"chunk {chunk}")
                     yield f"{chunk}\n\n"
-                yield "data: [DONE]\n\n"  # jay added
+                
         except Exception as e:
             self.stats.errors += 1
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
-
+        
+        yield "data: [DONE]\n\n"  # jay added
         latency_ms = (time.perf_counter() - t0) * 1000
         self._update_stats(decision, {}, latency_ms)
         yield f"data: {json.dumps({'done': True, 'latency_ms': round(latency_ms)})}\n\n"
