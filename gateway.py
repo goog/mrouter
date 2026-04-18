@@ -70,7 +70,7 @@ MODEL_REGISTRY: dict[Provider, dict[TaskDifficulty, str]] = {
     },
     Provider.OPENROUTER: {
         TaskDifficulty.SIMPLE:  "minimax/minimax-m2.7",
-        TaskDifficulty.MEDIUM:  "anthropic/claude-haiku-4.5",
+        TaskDifficulty.MEDIUM:  "xiaomi/mimo-v2-flash",
         TaskDifficulty.COMPLEX: "xiaomi/mimo-v2-pro",
         TaskDifficulty.LOCAL:   "gpt-4o-mini",
     },
@@ -310,7 +310,7 @@ class OpenrouterClient(BaseProviderClient):
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream("POST", self.BASE_URL, headers=self.headers, json=payload) as resp:
                 async for line in resp.aiter_lines():
-                    print(f"line: {line}")
+                    #print(f"line: {line}")
                     if line.startswith("data: "):
                         data = line[6:]
                         if data == "[DONE]":
@@ -570,7 +570,7 @@ class LLMGateway:
         yield "data: [DONE]\n\n"  # jay added
         latency_ms = (time.perf_counter() - t0) * 1000
         self._update_stats(decision, {}, latency_ms)
-        yield f"data: {json.dumps({'done': True, 'latency_ms': round(latency_ms)})}\n\n"
+        #yield f"data: {json.dumps({'done': True, 'latency_ms': round(latency_ms)})}\n\n"
 
 
 # ─── FastAPI app ───────────────────────────────────────────────────────────────
@@ -679,4 +679,4 @@ if __name__ == "__main__":
 ║    GET  /health               — health check         ║
 ╚══════════════════════════════════════════════════════╝
     """)
-    uvicorn.run("gateway:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("gateway:app", host="127.0.0.1", port=8000, reload=True)
