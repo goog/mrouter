@@ -1,13 +1,40 @@
 # mrouter
 
-## usage
-start the gateway
-```python gateway.py```
-
-
 ## config
-you should set LLM api env first, support openrouter, openai.  
+you should set LLM api env first, currently only support openrouter, openai.  
 openrouter has been tested lightly.
+
+config model on **openclaw**
+```
+"providers": {
+      "local": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "my-model",
+            "name": "My Local Model",
+            "compat": {
+              "requiresStringContent": true,
+              "supportsTools": true
+            },
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 4096
+          }
+        ]
+      },
+
+```
+
+## usage
+start the gateway  
+```python gateway.py```
 
 ## example
 ```
